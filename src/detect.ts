@@ -27,6 +27,7 @@ export function isPdfFile(buffer: ArrayBuffer): boolean {
 
 /** 버퍼로부터 파일 포맷 감지 */
 export function detectFormat(buffer: ArrayBuffer): FileType {
+  if (buffer.byteLength < 4) return "unknown"
   if (isHwpxFile(buffer)) return "hwpx"
   if (isOldHwpFile(buffer)) return "hwp"
   if (isPdfFile(buffer)) return "pdf"

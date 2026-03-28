@@ -63,6 +63,7 @@ function findSections(cfb: CfbContainer): Buffer[] {
 
   if (sections.length === 0 && cfb.FileIndex) {
     for (const entry of cfb.FileIndex) {
+      if (sections.length >= MAX_SECTIONS) break
       if (entry.name?.startsWith("Section") && entry.content) {
         const idx = parseInt(entry.name.replace("Section", ""), 10) || 0
         sections.push({ idx, content: Buffer.from(entry.content) })
@@ -146,8 +147,8 @@ function parseTableBlock(records: HwpRecord[], startIdx: number) {
     if (rec.tagId === TAG_CTRL_HEADER && rec.level <= tableLevel) break
 
     if (rec.tagId === TAG_TABLE && rec.data.length >= 8) {
-      rows = rec.data.readUInt16LE(4)
-      cols = rec.data.readUInt16LE(6)
+      rows = Math.min(rec.data.readUInt16LE(4), MAX_ROWS)
+      cols = Math.min(rec.data.readUInt16LE(6), MAX_COLS)
     }
 
     if (rec.tagId === TAG_LIST_HEADER) {

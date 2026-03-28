@@ -78,7 +78,7 @@ server.tool(
       }
     } catch (err) {
       return {
-        content: [{ type: "text", text: `오류: ${err instanceof Error ? err.message : String(err)}` }],
+        content: [{ type: "text", text: `오류: ${sanitizeError(err)}` }],
         isError: true,
       }
     }
@@ -112,12 +112,19 @@ server.tool(
       }
     } catch (err) {
       return {
-        content: [{ type: "text", text: `오류: ${err instanceof Error ? err.message : String(err)}` }],
+        content: [{ type: "text", text: `오류: ${sanitizeError(err)}` }],
         isError: true,
       }
     }
   }
 )
+
+// ─── 에러 메시지 정제 — 파일시스템 경로 노출 방지 ─────
+
+function sanitizeError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err)
+  return msg.replace(/[A-Za-z]:\\[^\s:]+/g, "[path]").replace(/\/(?:home|usr|tmp|var|etc)\/[^\s:]+/g, "[path]")
+}
 
 // ─── 서버 시작 ───────────────────────────────────────
 

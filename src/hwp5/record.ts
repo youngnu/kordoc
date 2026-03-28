@@ -41,11 +41,14 @@ export interface HwpFileHeader {
 
 // ─── 레코드 리더 ─────────────────────────────────────
 
+/** 최대 레코드 수 — 비정상 파일에 의한 메모리 폭주 방지 */
+const MAX_RECORDS = 500_000
+
 export function readRecords(data: Buffer): HwpRecord[] {
   const records: HwpRecord[] = []
   let offset = 0
 
-  while (offset + 4 <= data.length) {
+  while (offset + 4 <= data.length && records.length < MAX_RECORDS) {
     const header = data.readUInt32LE(offset)
     offset += 4
 
@@ -111,7 +114,7 @@ export function extractText(data: Buffer): string {
       case CHAR_NBSP: case CHAR_FIXED_NBSP: result += " "; break
       default:
         if (ch >= 0x0001 && ch <= 0x001f) {
-          const isExt = (ch >= 1 && ch <= 3) || (ch >= 11 && ch <= 18) || (ch >= 21 && ch <= 23)
+          const isExt = (ch >= 1 && ch <= 3) || (ch >= 10 && ch <= 18) || (ch >= 21 && ch <= 23)
           const isInline = (ch >= 4 && ch <= 9) || (ch >= 19 && ch <= 20)
           if ((isExt || isInline) && i + 14 <= data.length) i += 14
         } else if (ch >= 0x0020) {

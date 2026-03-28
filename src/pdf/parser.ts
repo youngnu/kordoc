@@ -2,6 +2,11 @@
 
 import type { ParseResult } from "../types.js"
 
+/** 최대 처리 페이지 수 — OOM 방지 */
+const MAX_PAGES = 5000
+/** 누적 텍스트 최대 크기 (100MB) — 메모리 폭주 방지 */
+const MAX_TOTAL_TEXT = 100 * 1024 * 1024
+
 import { createRequire } from "module"
 import { pathToFileURL } from "url"
 
@@ -74,17 +79,21 @@ export async function parsePdfDocument(buffer: ArrayBuffer): Promise<ParseResult
 
     const pageTexts: string[] = []
     let totalChars = 0
+    let totalTextBytes = 0
+    const effectivePageCount = Math.min(pageCount, MAX_PAGES)
 
-    for (let i = 1; i <= pageCount; i++) {
+    for (let i = 1; i <= effectivePageCount; i++) {
       const page = await doc.getPage(i)
       const textContent = await page.getTextContent()
       const lines = groupTextItemsByLine(textContent.items)
       const pageText = lines.join("\n")
       totalChars += pageText.replace(/\s/g, "").length
+      totalTextBytes += pageText.length * 2
+      if (totalTextBytes > MAX_TOTAL_TEXT) throw new Error(`텍스트 추출 크기 초과 (${MAX_TOTAL_TEXT / 1024 / 1024}MB 제한)`)
       pageTexts.push(pageText)
     }
 
-    const avgCharsPerPage = totalChars / pageCount
+    const avgCharsPerPage = totalChars / effectivePageCount
     if (avgCharsPerPage < 10) {
       return {
         success: false,
@@ -106,7 +115,8 @@ export async function parsePdfDocument(buffer: ArrayBuffer): Promise<ParseResult
 
     markdown = reconstructTables(markdown)
 
-    return { success: true, fileType: "pdf", markdown, pageCount, isImageBased: false }
+    const truncated = pageCount > MAX_PAGES
+    return { success: true, fileType: "pdf", markdown, pageCount: effectivePageCount, isImageBased: false, ...(truncated && { warning: `PDF가 ${pageCount}페이지이지만 ${MAX_PAGES}페이지까지만 처리했습니다` }) }
   } finally {
     await doc.destroy().catch(() => {})
   }

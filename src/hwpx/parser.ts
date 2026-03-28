@@ -37,6 +37,11 @@ export async function parseHwpxDocument(buffer: ArrayBuffer): Promise<string> {
     return extractFromBrokenZip(buffer)
   }
 
+  // ZIP 전체 엔트리의 선언된 비압축 크기 합산 검증 (ZIP bomb 조기 감지)
+  let declaredTotal = 0
+  zip.forEach((_, file) => { declaredTotal += (file as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize ?? 0 })
+  if (declaredTotal > MAX_DECOMPRESS_SIZE) throw new Error("ZIP 비압축 크기 초과 (ZIP bomb 의심)")
+
   const sectionPaths = await resolveSectionPaths(zip)
   if (sectionPaths.length === 0) throw new Error("HWPX에서 섹션 파일을 찾을 수 없습니다")
 
@@ -85,8 +90,9 @@ function extractFromBrokenZip(buffer: ArrayBuffer): string {
     const nameBytes = data.slice(pos + 30, pos + 30 + nameLen)
     const name = new TextDecoder().decode(nameBytes)
 
-    // 경로 순회 방지 — 상위 디렉토리 참조 차단
-    if (name.includes("..") || name.startsWith("/")) { pos = fileStart + compSize; continue }
+    // 경로 순회 방지 — 상위 디렉토리 참조 및 절대 경로 차단
+    const normalizedName = name.replace(/\\/g, "/")
+    if (normalizedName.includes("..") || normalizedName.startsWith("/") || /^[A-Za-z]:/.test(normalizedName)) { pos = fileStart + compSize; continue }
     const fileData = data.slice(fileStart, fileStart + compSize)
     pos = fileStart + compSize
 
@@ -120,7 +126,8 @@ function extractFromBrokenZip(buffer: ArrayBuffer): string {
 async function resolveSectionPaths(zip: JSZip): Promise<string[]> {
   const manifestPaths = ["Contents/content.hpf", "content.hpf"]
   for (const mp of manifestPaths) {
-    const file = zip.file(new RegExp(`^${mp.replace(/\./g, "\\.")}$`, "i"))[0]
+    const mpLower = mp.toLowerCase()
+    const file = zip.file(mp) || Object.values(zip.files).find(f => f.name.toLowerCase() === mpLower) || null
     if (!file) continue
     const xml = await file.async("text")
     const paths = parseSectionPathsFromManifest(xml)

@@ -49,7 +49,7 @@ npm install kordoc
 npm install pdfjs-dist
 ```
 
-> **Since v0.2.1**, `pdfjs-dist` is an optional peer dependency. Not needed for HWP/HWPX parsing.
+> `pdfjs-dist` is an optional peer dependency. Not needed for HWP/HWPX parsing.
 
 ## Usage
 
@@ -147,18 +147,21 @@ import type { IRBlock, IRTable, IRCell, CellContext } from "kordoc"
 
 ## Security
 
-v0.2.2 security hardening (cumulative since v0.2.1):
+v1.0.0 production-grade security hardening:
 
-- **ZIP bomb protection** — 100MB decompression limit, 500 entry cap
+- **ZIP bomb protection** — Pre-scan declared uncompressed sizes, 100MB decompression limit, 500 entry cap
 - **XXE/Billion Laughs prevention** — Internal DTD subsets fully stripped from HWPX XML
 - **Decompression bomb guard** — `maxOutputLength` on HWP5 zlib streams, cumulative 100MB limit across sections
+- **PDF resource limits** — MAX_PAGES=5,000, cumulative text size 100MB cap, `doc.destroy()` cleanup
+- **HWP5 record cap** — Max 500,000 records per section, prevents memory exhaustion from crafted files
+- **Table dimension clamping** — rows/cols read from HWP5 binary clamped to MAX_ROWS/MAX_COLS before allocation
 - **colSpan/rowSpan clamping** — Crafted merge values clamped to grid bounds (MAX_COLS=200, MAX_ROWS=10,000)
-- **Broken ZIP path traversal guard** — `..` and absolute path entries rejected, filename length capped
-- **MCP path restriction** — Only `.hwp`, `.hwpx`, `.pdf` extensions allowed
+- **Path traversal guard** — Backslash normalization, `..`, absolute paths, Windows drive letters all rejected
+- **MCP error sanitization** — Filesystem paths stripped from error messages returned to clients
+- **MCP path restriction** — Only `.hwp`, `.hwpx`, `.pdf` extensions allowed, symlink resolution
 - **File size limit** — 500MB max in MCP server and CLI
-- **PDF resource cleanup** — `doc.destroy()` prevents WASM memory leaks
-- **Table memory guard** — Sparse Set-based allocation in Pass 1, 10,000 row cap
-- **HWP5 section limit** — Max 100 sections to prevent infinite loop on corrupted files
+- **HWP5 section limit** — Max 100 sections in both primary and fallback paths
+- **HWP5 control char fix** — Character code 10 (footnote/endnote) now correctly handled
 
 ## How It Works
 
