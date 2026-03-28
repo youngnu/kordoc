@@ -1,6 +1,6 @@
 {
   "name": "kordoc",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Parse Korean documents (HWP, HWPX, PDF) to Markdown",
   "type": "module",
   "exports": {
@@ -55,7 +55,15 @@
     "cfb": "^1.2.2",
     "commander": "^13.0.0",
     "jszip": "^3.10.1",
-    "pdfjs-dist": "^5.5.207"
+    "zod": "^3.23.0"
+  },
+  "peerDependencies": {
+    "pdfjs-dist": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "pdfjs-dist": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

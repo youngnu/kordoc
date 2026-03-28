@@ -70,16 +70,21 @@ export function readRecords(data: Buffer): HwpRecord[] {
 
 // ─── 스트림 압축 해제 ────────────────────────────────
 
+/** 압축 해제 최대 크기 (100MB) — decompression bomb 방지 */
+const MAX_DECOMPRESS_SIZE = 100 * 1024 * 1024
+
 export function decompressStream(data: Buffer): Buffer {
+  const opts = { maxOutputLength: MAX_DECOMPRESS_SIZE }
   if (data.length >= 2 && data[0] === 0x78) {
-    try { return inflateSync(data) } catch { /* fallback to raw */ }
+    try { return inflateSync(data, opts) } catch { /* fallback to raw */ }
   }
-  return inflateRawSync(data)
+  return inflateRawSync(data, opts)
 }
 
 // ─── FileHeader 파싱 ─────────────────────────────────
 
 export function parseFileHeader(data: Buffer): HwpFileHeader {
+  if (data.length < 40) throw new Error("FileHeader가 너무 짧습니다 (최소 40바이트)")
   const sig = data.subarray(0, 32).toString("utf8").replace(/\0+$/, "")
   return {
     signature: sig,
@@ -110,6 +115,16 @@ export function extractText(data: Buffer): string {
           const isInline = (ch >= 4 && ch <= 9) || (ch >= 19 && ch <= 20)
           if ((isExt || isInline) && i + 14 <= data.length) i += 14
         } else if (ch >= 0x0020) {
+          // UTF-16 surrogate pair 처리 (BMP 외 문자: 이모지, CJK 확장 등)
+          if (ch >= 0xd800 && ch <= 0xdbff && i + 1 < data.length) {
+            const lo = data.readUInt16LE(i)
+            if (lo >= 0xdc00 && lo <= 0xdfff) {
+              i += 2
+              const codePoint = ((ch - 0xd800) << 10) + (lo - 0xdc00) + 0x10000
+              result += String.fromCodePoint(codePoint)
+              break
+            }
+          }
           result += String.fromCharCode(ch)
         }
         break

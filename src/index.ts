@@ -23,6 +23,9 @@ import type { ParseResult } from "./types.js"
  * ```
  */
 export async function parse(buffer: ArrayBuffer): Promise<ParseResult> {
+  if (!buffer || buffer.byteLength === 0) {
+    return { success: false, fileType: "unknown", error: "빈 버퍼이거나 유효하지 않은 입력입니다." }
+  }
   const format = detectFormat(buffer)
 
   switch (format) {

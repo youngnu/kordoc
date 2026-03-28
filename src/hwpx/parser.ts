@@ -10,7 +10,17 @@ import { DOMParser } from "@xmldom/xmldom"
 import { buildTable, convertTableToText, blocksToMarkdown } from "../table/builder.js"
 import type { CellContext, IRBlock } from "../types.js"
 
+/** 압축 해제 최대 크기 (100MB) — ZIP bomb 방지 */
+const MAX_DECOMPRESS_SIZE = 100 * 1024 * 1024
+/** 손상 ZIP 복구 시 최대 엔트리 수 */
+const MAX_ZIP_ENTRIES = 500
+
 interface TableState { rows: CellContext[][]; currentRow: CellContext[]; cell: CellContext | null }
+
+/** XXE/Billion Laughs 방지 — DOCTYPE 제거 */
+function stripDtd(xml: string): string {
+  return xml.replace(/<!DOCTYPE[^>]*>/gi, "")
+}
 
 export async function parseHwpxDocument(buffer: ArrayBuffer): Promise<string> {
   let zip: JSZip
@@ -25,11 +35,14 @@ export async function parseHwpxDocument(buffer: ArrayBuffer): Promise<string> {
   const sectionPaths = await resolveSectionPaths(zip)
   if (sectionPaths.length === 0) throw new Error("HWPX에서 섹션 파일을 찾을 수 없습니다")
 
+  let totalDecompressed = 0
   const blocks: IRBlock[] = []
   for (const path of sectionPaths) {
     const file = zip.file(path)
     if (!file) continue
     const xml = await file.async("text")
+    totalDecompressed += xml.length * 2 // UTF-16 추정
+    if (totalDecompressed > MAX_DECOMPRESS_SIZE) throw new Error("ZIP 압축 해제 크기 초과 (ZIP bomb 의심)")
     blocks.push(...parseSectionXml(xml))
   }
   return blocksToMarkdown(blocks)
@@ -42,19 +55,27 @@ function extractFromBrokenZip(buffer: ArrayBuffer): string {
   const view = new DataView(buffer)
   let pos = 0
   const texts: string[] = []
+  let totalDecompressed = 0
+  let entryCount = 0
 
   while (pos < data.length - 30) {
     // PK\x03\x04 시그니처 확인
     if (data[pos] !== 0x50 || data[pos + 1] !== 0x4b || data[pos + 2] !== 0x03 || data[pos + 3] !== 0x04) break
+
+    if (++entryCount > MAX_ZIP_ENTRIES) break
 
     const method = view.getUint16(pos + 8, true)
     const compSize = view.getUint32(pos + 18, true)
     const nameLen = view.getUint16(pos + 26, true)
     const extraLen = view.getUint16(pos + 28, true)
 
+    const fileStart = pos + 30 + nameLen + extraLen
+    // 범위 초과 검증 — OOB 및 무한 루프 방지
+    if (fileStart + compSize > data.length) break
+    if (compSize === 0 && method !== 0) { pos = fileStart; continue }
+
     const nameBytes = data.slice(pos + 30, pos + 30 + nameLen)
     const name = new TextDecoder().decode(nameBytes)
-    const fileStart = pos + 30 + nameLen + extraLen
     const fileData = data.slice(fileStart, fileStart + compSize)
     pos = fileStart + compSize
 
@@ -65,10 +86,13 @@ function extractFromBrokenZip(buffer: ArrayBuffer): string {
       if (method === 0) {
         content = new TextDecoder().decode(fileData)
       } else if (method === 8) {
-        content = new TextDecoder().decode(inflateRawSync(Buffer.from(fileData)))
+        const decompressed = inflateRawSync(Buffer.from(fileData), { maxOutputLength: MAX_DECOMPRESS_SIZE })
+        content = new TextDecoder().decode(decompressed)
       } else {
         continue
       }
+      totalDecompressed += content.length * 2
+      if (totalDecompressed > MAX_DECOMPRESS_SIZE) throw new Error("압축 해제 크기 초과")
       const sectionText = blocksToMarkdown(parseSectionXml(content))
       if (sectionText) texts.push(sectionText)
     } catch {
@@ -99,7 +123,7 @@ async function resolveSectionPaths(zip: JSZip): Promise<string[]> {
 
 function parseSectionPathsFromManifest(xml: string): string[] {
   const parser = new DOMParser()
-  const doc = parser.parseFromString(xml, "text/xml")
+  const doc = parser.parseFromString(stripDtd(xml), "text/xml")
   const items = doc.getElementsByTagName("opf:item")
   const spine = doc.getElementsByTagName("opf:itemref")
 
@@ -134,7 +158,7 @@ function parseSectionPathsFromManifest(xml: string): string[] {
 
 function parseSectionXml(xml: string): IRBlock[] {
   const parser = new DOMParser()
-  const doc = parser.parseFromString(xml, "text/xml")
+  const doc = parser.parseFromString(stripDtd(xml), "text/xml")
   if (!doc.documentElement) return []
 
   const blocks: IRBlock[] = []

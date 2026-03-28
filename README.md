@@ -44,7 +44,12 @@ South Korea's government runs on **HWP** — a proprietary word processor the re
 
 ```bash
 npm install kordoc
+
+# PDF support requires pdfjs-dist (optional peer dependency)
+npm install pdfjs-dist
 ```
+
+> **Since v0.2.1**, `pdfjs-dist` is an optional peer dependency. Not needed for HWP/HWPX parsing.
 
 ## Usage
 
@@ -138,7 +143,17 @@ import type { IRBlock, IRTable, IRCell, CellContext } from "kordoc"
 ## Requirements
 
 - **Node.js** >= 18
-- **pdfjs-dist** — Only needed for PDF. HWP/HWPX work without it.
+- **pdfjs-dist** >= 4.0.0 — Optional. Only needed for PDF. HWP/HWPX work without it.
+
+## Security
+
+v0.2.1 includes the following security hardening:
+
+- **ZIP bomb protection** — 100MB decompression limit, 500 entry cap
+- **XXE prevention** — DOCTYPE declarations stripped from HWPX XML
+- **Decompression bomb guard** — `maxOutputLength` on HWP5 zlib streams
+- **MCP path restriction** — Only `.hwp`, `.hwpx`, `.pdf` extensions allowed
+- **Table memory guard** — 10,000 row cap on table builder
 
 ## How It Works
 

@@ -3,17 +3,22 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
-import { readFileSync, realpathSync } from "fs"
-import { resolve, isAbsolute } from "path"
+import { readFileSync, realpathSync, openSync, readSync, closeSync } from "fs"
+import { resolve, isAbsolute, extname } from "path"
 import { parse, detectFormat } from "./index.js"
 import { VERSION, toArrayBuffer } from "./utils.js"
 
-/** 경로 정규화 및 기본 검증 */
+/** 허용 파일 확장자 */
+const ALLOWED_EXTENSIONS = new Set([".hwp", ".hwpx", ".pdf"])
+
+/** 경로 정규화 및 보안 검증 */
 function safePath(filePath: string): string {
+  if (!filePath) throw new Error("파일 경로가 비어있습니다")
   const resolved = resolve(filePath)
-  // 심볼릭 링크 해석하여 실제 경로 확인
   const real = realpathSync(resolved)
   if (!isAbsolute(real)) throw new Error("절대 경로만 허용됩니다")
+  const ext = extname(real).toLowerCase()
+  if (!ALLOWED_EXTENSIONS.has(ext)) throw new Error(`지원하지 않는 확장자입니다: ${ext} (허용: ${[...ALLOWED_EXTENSIONS].join(", ")})`)
   return real
 }
 
@@ -28,7 +33,7 @@ server.tool(
   "parse_document",
   "한국 문서 파일(HWP, HWPX, PDF)을 마크다운으로 변환합니다. 파일 경로를 입력하면 포맷을 자동 감지하여 텍스트를 추출합니다.",
   {
-    file_path: z.string().describe("파싱할 문서 파일의 절대 경로 (HWP, HWPX, PDF)"),
+    file_path: z.string().min(1).describe("파싱할 문서 파일의 절대 경로 (HWP, HWPX, PDF)"),
   },
   async ({ file_path }) => {
     try {
@@ -77,13 +82,17 @@ server.tool(
   "detect_format",
   "파일의 포맷을 매직 바이트로 감지합니다 (hwpx, hwp, pdf, unknown).",
   {
-    file_path: z.string().describe("감지할 파일의 절대 경로"),
+    file_path: z.string().min(1).describe("감지할 파일의 절대 경로"),
   },
   async ({ file_path }) => {
     try {
       const resolved = safePath(file_path)
-      const buffer = readFileSync(resolved, { flag: "r" })
-      const header = toArrayBuffer(buffer.subarray(0, 16))
+      // 전체 파일 대신 첫 16바이트만 읽기 — 대용량 파일 OOM 방지
+      const fd = openSync(resolved, "r")
+      const headerBuf = Buffer.alloc(16)
+      readSync(fd, headerBuf, 0, 16, 0)
+      closeSync(fd)
+      const header = toArrayBuffer(headerBuf)
       const format = detectFormat(header)
       return {
         content: [{ type: "text", text: `${file_path}: ${format}` }],

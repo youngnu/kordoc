@@ -4,8 +4,11 @@ import type { CellContext, IRBlock, IRCell, IRTable } from "../types.js"
 
 /** 테이블 열 수 상한 — 한국 공공문서 기준 충분한 값 */
 const MAX_COLS = 200
+/** 테이블 행 수 상한 — 메모리 폭주 방지 */
+const MAX_ROWS = 10000
 
 export function buildTable(rows: CellContext[][]): IRTable {
+  if (rows.length > MAX_ROWS) rows = rows.slice(0, MAX_ROWS)
   const numRows = rows.length
 
   // Pass 1: maxCols 계산

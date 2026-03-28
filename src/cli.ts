@@ -1,6 +1,6 @@
 /** kordoc CLI — 모두 파싱해버리겠다 */
 
-import { readFileSync, writeFileSync } from "fs"
+import { readFileSync, writeFileSync, mkdirSync } from "fs"
 import { basename, resolve } from "path"
 import { Command } from "commander"
 import { parse, detectFormat } from "./index.js"
@@ -50,6 +50,7 @@ program
           writeFileSync(opts.output, output, "utf-8")
           if (!opts.silent) process.stderr.write(`  → ${opts.output}\n`)
         } else if (opts.outDir) {
+          mkdirSync(opts.outDir, { recursive: true })
           const outPath = resolve(opts.outDir, fileName.replace(/\.[^.]+$/, ".md"))
           writeFileSync(outPath, output, "utf-8")
           if (!opts.silent) process.stderr.write(`  → ${outPath}\n`)
