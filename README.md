@@ -14,10 +14,24 @@
 
 ---
 
-## What's New in v1.6.1
+## What's New in v1.7.0
+
+- **Image Extraction (HWP/HWPX)** — Binary image extraction from ZIP entries and HWP5 BinData streams. Rendered as `![image](...)` in markdown output.
+- **Partial Parsing (Graceful Degradation)** — Single page failures no longer abort the whole document. Failed pages emit `PARTIAL_PARSE` warnings and parsing continues.
+- **Progress Callbacks** — `onProgress` callback in `ParseOptions`. CLI shows `[3/15 pages]` progress. Batch mode shows `[2/10 files]`.
+- **File Path Input** — `parse("path/to/file.hwp")` string overload. Auto-reads file, detects format, returns result.
+- **PDF Header/Footer Filtering** — `removeHeaderFooter: true` option removes repeated text at page edges. Removed elements recorded in `ParseWarning`.
+- **Security Hardening** — ZIP bomb cumulative-size tracking across all file types, SSRF prevention on webhook URLs, XSS-safe hyperlink rendering (javascript: URLs stripped), null-byte path traversal detection, Levenshtein length guard (O(m×n) DoS prevention), 30s PDF load timeout.
+- **Bug Fixes** — HWPX generator separator logic, XML recursion depth limit (MAX_XML_DEPTH=200), PDF table row merge protection, CLI `--format` validation, variable shadowing in PDF parser.
+- **UX Improvements** — KV table false-positive reduction (time/URL/number patterns excluded), MCP `parse_metadata` uses 50MB limit with header-only format detection, Watch debounce increased to 1000ms with stable-size check.
+
+<details>
+<summary>v1.6.1 fixes</summary>
 
 - **HWP5 Table Cell Offset Fix** — Fixed critical 2-byte offset misalignment in LIST_HEADER parsing. Row address was incorrectly read as colSpan, causing 3-column tables to explode into 6+ columns with misaligned content. Tables now use colAddr/rowAddr-based direct placement for accurate cell positioning.
 - **HWP5 TAB Control Character Fix** — TAB (0x0009) inline control's 14-byte extension data was not skipped, producing garbage characters (`࣐Ā`) after every tab in the output. Fixed by adding the required 14-byte skip.
+
+</details>
 
 <details>
 <summary>v1.6.0 features</summary>
