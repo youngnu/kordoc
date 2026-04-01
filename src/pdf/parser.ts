@@ -21,6 +21,24 @@ GlobalWorkerOptions.workerSrc = ""
 // ─── 안전 한계값 (구조적 파싱과 무관) ────────────────
 const MAX_PAGES = 5000
 const MAX_TOTAL_TEXT = 100 * 1024 * 1024 // 100MB
+/** PDF 로딩 타임아웃 (30초) — 악성/대용량 PDF 무한 대기 방지 */
+const PDF_LOAD_TIMEOUT_MS = 30_000
+
+/** getDocument + 타임아웃 래퍼 */
+async function loadPdfWithTimeout(buffer: ArrayBuffer) {
+  const loadingTask = getDocument({
+    data: new Uint8Array(buffer),
+    useSystemFonts: true,
+    disableFontFace: true,
+    isEvalSupported: false,
+  })
+  return Promise.race([
+    loadingTask.promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => { loadingTask.destroy(); reject(new KordocError("PDF 로딩 타임아웃 (30초 초과)")) }, PDF_LOAD_TIMEOUT_MS)
+    ),
+  ])
+}
 
 interface PdfTextItem {
   str: string
@@ -44,12 +62,7 @@ interface NormItem {
 }
 
 export async function parsePdfDocument(buffer: ArrayBuffer, options?: ParseOptions): Promise<ParseResult> {
-  const doc = await getDocument({
-    data: new Uint8Array(buffer),
-    useSystemFonts: true,
-    disableFontFace: true,
-    isEvalSupported: false,
-  }).promise
+  const doc = await loadPdfWithTimeout(buffer)
 
   try {
     const pageCount = doc.numPages
@@ -174,12 +187,7 @@ function parsePdfDate(dateStr: string): string | undefined {
 
 /** 메타데이터만 추출 (전체 파싱 없이) — MCP parse_metadata용 */
 export async function extractPdfMetadataOnly(buffer: ArrayBuffer): Promise<DocumentMetadata> {
-  const doc = await getDocument({
-    data: new Uint8Array(buffer),
-    useSystemFonts: true,
-    disableFontFace: true,
-    isEvalSupported: false,
-  }).promise
+  const doc = await loadPdfWithTimeout(buffer)
 
   try {
     const metadata: DocumentMetadata = { pageCount: doc.numPages }

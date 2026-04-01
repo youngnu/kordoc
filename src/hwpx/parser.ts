@@ -27,6 +27,17 @@ const MAX_XML_DEPTH = 200
 
 interface TableState { rows: CellContext[][]; currentRow: CellContext[]; cell: CellContext | null }
 
+/** xmldom DOMParser 생성 — errorHandler 설정으로 malformed XML 경고 수집 */
+function createXmlParser(warnings?: ParseWarning[]): DOMParser {
+  return new DOMParser({
+    errorHandler: {
+      warning(msg: string) { warnings?.push({ code: "MALFORMED_XML", message: `XML 경고: ${msg}` }) },
+      error(msg: string) { warnings?.push({ code: "MALFORMED_XML", message: `XML 오류: ${msg}` }) },
+      fatalError(msg: string) { throw new KordocError(`XML 파싱 실패: ${msg}`) },
+    },
+  })
+}
+
 // ─── HWPX 스타일 정보 ──────────────────────────────
 
 interface HwpxCharProperty {
@@ -42,7 +53,7 @@ interface HwpxStyleMap {
 }
 
 /** head.xml 또는 header.xml에서 스타일 정보 추출 */
-async function extractHwpxStyles(zip: JSZip): Promise<HwpxStyleMap> {
+async function extractHwpxStyles(zip: JSZip, decompressed?: { total: number }): Promise<HwpxStyleMap> {
   const result: HwpxStyleMap = {
     charProperties: new Map(),
     styles: new Map(),
@@ -56,7 +67,11 @@ async function extractHwpxStyles(zip: JSZip): Promise<HwpxStyleMap> {
 
     try {
       const xml = await file.async("text")
-      const parser = new DOMParser()
+      if (decompressed) {
+        decompressed.total += xml.length * 2
+        if (decompressed.total > MAX_DECOMPRESS_SIZE) throw new KordocError("ZIP 압축 해제 크기 초과 (ZIP bomb 의심)")
+      }
+      const parser = createXmlParser()
       const doc = parser.parseFromString(stripDtd(xml), "text/xml")
       if (!doc.documentElement) continue
 
@@ -153,12 +168,15 @@ export async function parseHwpxDocument(buffer: ArrayBuffer, options?: ParseOpti
     throw new KordocError("ZIP 엔트리 수 초과 (ZIP bomb 의심)")
   }
 
+  // ZIP 전체 파일 누적 압축해제 크기 추적 (비섹션 파일 포함)
+  const decompressed = { total: 0 }
+
   // 메타데이터 추출 (best-effort)
   const metadata: DocumentMetadata = {}
-  await extractHwpxMetadata(zip, metadata)
+  await extractHwpxMetadata(zip, metadata, decompressed)
 
   // 스타일 정보 추출 (best-effort)
-  const styleMap = await extractHwpxStyles(zip)
+  const styleMap = await extractHwpxStyles(zip, decompressed)
   const warnings: ParseWarning[] = []
 
   const sectionPaths = await resolveSectionPaths(zip)
@@ -168,16 +186,14 @@ export async function parseHwpxDocument(buffer: ArrayBuffer, options?: ParseOpti
 
   // 페이지 범위 필터링 (섹션 단위 근사치)
   const pageFilter = options?.pages ? parsePageRange(options.pages, sectionPaths.length) : null
-
-  let totalDecompressed = 0
   const blocks: IRBlock[] = []
   for (let si = 0; si < sectionPaths.length; si++) {
     if (pageFilter && !pageFilter.has(si + 1)) continue
     const file = zip.file(sectionPaths[si])
     if (!file) continue
     const xml = await file.async("text")
-    totalDecompressed += xml.length * 2
-    if (totalDecompressed > MAX_DECOMPRESS_SIZE) throw new KordocError("ZIP 압축 해제 크기 초과 (ZIP bomb 의심)")
+    decompressed.total += xml.length * 2
+    if (decompressed.total > MAX_DECOMPRESS_SIZE) throw new KordocError("ZIP 압축 해제 크기 초과 (ZIP bomb 의심)")
     blocks.push(...parseSectionXml(xml, styleMap, warnings, si + 1))
   }
 
@@ -199,7 +215,7 @@ export async function parseHwpxDocument(buffer: ArrayBuffer, options?: ParseOpti
  * HWPX ZIP 내 메타데이터 파일에서 Dublin Core 정보 추출.
  * 표준 경로: meta.xml, docProps/core.xml, META-INF/container.xml
  */
-async function extractHwpxMetadata(zip: JSZip, metadata: DocumentMetadata): Promise<void> {
+async function extractHwpxMetadata(zip: JSZip, metadata: DocumentMetadata, decompressed?: { total: number }): Promise<void> {
   try {
     // meta.xml (HWPX 표준) 또는 docProps/core.xml (OOXML 호환)
     const metaPaths = ["meta.xml", "META-INF/meta.xml", "docProps/core.xml"]
@@ -207,6 +223,10 @@ async function extractHwpxMetadata(zip: JSZip, metadata: DocumentMetadata): Prom
       const file = zip.file(mp) || Object.values(zip.files).find(f => f.name.toLowerCase() === mp.toLowerCase()) || null
       if (!file) continue
       const xml = await file.async("text")
+      if (decompressed) {
+        decompressed.total += xml.length * 2
+        if (decompressed.total > MAX_DECOMPRESS_SIZE) throw new KordocError("ZIP 압축 해제 크기 초과 (ZIP bomb 의심)")
+      }
       parseDublinCoreMetadata(xml, metadata)
       if (metadata.title || metadata.author) return
     }
@@ -217,7 +237,7 @@ async function extractHwpxMetadata(zip: JSZip, metadata: DocumentMetadata): Prom
 
 /** Dublin Core (dc:) 메타데이터 XML 파싱 */
 function parseDublinCoreMetadata(xml: string, metadata: DocumentMetadata): void {
-  const parser = new DOMParser()
+  const parser = createXmlParser()
   const doc = parser.parseFromString(stripDtd(xml), "text/xml")
   if (!doc.documentElement) return
 
@@ -326,8 +346,15 @@ function extractFromBrokenZip(buffer: ArrayBuffer): InternalParseResult {
   let entryCount = 0
 
   while (pos < data.length - 30) {
-    // PK\x03\x04 시그니처 확인
-    if (data[pos] !== 0x50 || data[pos + 1] !== 0x4b || data[pos + 2] !== 0x03 || data[pos + 3] !== 0x04) break
+    // PK\x03\x04 시그니처 확인 — 미매칭 시 다음 PK 시그니처까지 스캔 (중간 손상 복구)
+    if (data[pos] !== 0x50 || data[pos + 1] !== 0x4b || data[pos + 2] !== 0x03 || data[pos + 3] !== 0x04) {
+      pos++
+      while (pos < data.length - 30) {
+        if (data[pos] === 0x50 && data[pos + 1] === 0x4b && data[pos + 2] === 0x03 && data[pos + 3] === 0x04) break
+        pos++
+      }
+      continue
+    }
 
     if (++entryCount > MAX_ZIP_ENTRIES) break
 
@@ -396,7 +423,7 @@ async function resolveSectionPaths(zip: JSZip): Promise<string[]> {
 }
 
 function parseSectionPathsFromManifest(xml: string): string[] {
-  const parser = new DOMParser()
+  const parser = createXmlParser()
   const doc = parser.parseFromString(stripDtd(xml), "text/xml")
   const items = doc.getElementsByTagName("opf:item")
   const spine = doc.getElementsByTagName("opf:itemref")
@@ -475,7 +502,7 @@ function detectHwpxHeadings(blocks: IRBlock[], styleMap: HwpxStyleMap): void {
 // ─── 섹션 XML 파싱 ──────────────────────────────────
 
 function parseSectionXml(xml: string, styleMap?: HwpxStyleMap, warnings?: ParseWarning[], sectionNum?: number): IRBlock[] {
-  const parser = new DOMParser()
+  const parser = createXmlParser(warnings)
   const doc = parser.parseFromString(stripDtd(xml), "text/xml")
   if (!doc.documentElement) return []
 

@@ -41,6 +41,7 @@ export function sanitizeError(err: unknown): string {
  * 백슬래시 정규화, .., 절대경로, Windows 드라이브 문자 모두 차단.
  */
 export function isPathTraversal(name: string): boolean {
+  if (name.includes("\x00")) return true
   const normalized = name.replace(/\\/g, "/")
   return normalized.includes("..") || normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized)
 }

@@ -127,6 +127,7 @@ export type WarningCode =
   | "UNSUPPORTED_ELEMENT"
   | "BROKEN_ZIP_RECOVERY"
   | "HIDDEN_TEXT_FILTERED"
+  | "MALFORMED_XML"
 
 /** 문서 구조 (헤딩 트리) */
 export interface OutlineItem {

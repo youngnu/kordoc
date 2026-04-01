@@ -2,6 +2,14 @@
 
 import type { CellContext, IRBlock, IRCell, IRTable } from "../types.js"
 
+/** 하이퍼링크 URL 살균 — javascript: 등 XSS 위험 스킴 차단 */
+const SAFE_HREF_RE = /^(?:https?:|mailto:|tel:|#)/i
+function sanitizeHref(href: string): string | null {
+  const trimmed = href.trim()
+  if (!trimmed || !SAFE_HREF_RE.test(trimmed)) return null
+  return trimmed
+}
+
 /** 테이블 열 수 상한 — 한국 공공문서 기준 충분한 값 */
 export const MAX_COLS = 200
 /** 테이블 행 수 상한 — 메모리 폭주 방지 */
@@ -135,9 +143,10 @@ export function blocksToMarkdown(blocks: IRBlock[]): string {
         continue
       }
 
-      // 하이퍼링크가 있으면 텍스트에 링크 삽입
+      // 하이퍼링크가 있으면 텍스트에 링크 삽입 (javascript: 등 위험 스킴 제거)
       if (block.href) {
-        text = `[${text}](${block.href})`
+        const href = sanitizeHref(block.href)
+        if (href) text = `[${text}](${href})`
       }
 
       // 각주가 있으면 괄호로 인라인 삽입

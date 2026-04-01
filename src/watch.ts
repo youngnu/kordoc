@@ -22,6 +22,7 @@ export async function watchDirectory(options: WatchOptions): Promise<void> {
   const { dir, outDir, webhook, format = "markdown", pages, silent } = options
 
   if (!existsSync(dir)) throw new Error(`디렉토리를 찾을 수 없습니다: ${dir}`)
+  if (webhook) validateWebhookUrl(webhook)
   if (outDir) mkdirSync(outDir, { recursive: true })
 
   const log = silent ? () => {} : (msg: string) => process.stderr.write(msg + "\n")
@@ -97,9 +98,37 @@ export async function watchDirectory(options: WatchOptions): Promise<void> {
   return new Promise(() => {})
 }
 
+/** Webhook URL 검증 — SSRF 방지: http/https만 허용, localhost/private IP 차단 */
+function validateWebhookUrl(url: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error(`유효하지 않은 webhook URL: ${url}`)
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`허용되지 않는 webhook 프로토콜: ${parsed.protocol}`)
+  }
+  const hostname = parsed.hostname.toLowerCase()
+  if (
+    hostname === "localhost" ||
+    hostname === "[::1]" ||
+    hostname.startsWith("127.") ||
+    hostname.startsWith("10.") ||
+    hostname.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+    hostname === "0.0.0.0" ||
+    hostname.startsWith("169.254.") ||
+    hostname.endsWith(".local")
+  ) {
+    throw new Error(`내부 네트워크 대상 webhook은 허용되지 않습니다: ${hostname}`)
+  }
+}
+
 async function sendWebhook(url: string | undefined, payload: Record<string, unknown>): Promise<void> {
   if (!url) return
   try {
+    validateWebhookUrl(url)
     await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
