@@ -20,18 +20,24 @@ export const TAG_DOC_CHAR_SHAPE = 0x0037
 export const TAG_DOC_PARA_SHAPE = 0x0039
 export const TAG_DOC_STYLE = 0x003a
 
-// 특수 문자 코드 (UTF-16LE)
-// HWP 스펙에서 0x0000은 NUL이 아닌 줄바꿈(line break)으로 정의됨
-const CHAR_LINE = 0x0000
-const CHAR_PARA = 0x000d
-const CHAR_TAB = 0x0009
-const CHAR_HYPHEN = 0x001e
-const CHAR_NBSP = 0x001f
-const CHAR_FIXED_NBSP = 0x0018
+// 특수 문자 코드 (UTF-16LE) — HWP 5.0 바이너리 스펙 + rhwp 검증
+// 3가지 카테고리: char(2바이트), inline(16바이트), extended(16바이트)
+// char:     0, 10, 13, 24-31 — 제어문자만, 확장 데이터 없음
+// inline:   4-9, 19-20       — 제어문자(2) + 확장(14) = 16바이트
+// extended: 1-3, 11-12, 14-18, 21-23 — 제어문자(2) + 확장(14) = 16바이트
+const CHAR_LINE = 0x0000        // char: 줄바꿈
+const CHAR_SECTION_BREAK = 0x000a  // char: 구역/단 나눔
+const CHAR_PARA = 0x000d        // char: 문단 끝
+const CHAR_TAB = 0x0009         // inline: 탭
+const CHAR_HYPHEN = 0x001e      // char: 하이픈
+const CHAR_NBSP = 0x001f        // char: 비분리 공백
+const CHAR_FIXED_NBSP = 0x0018  // char: 고정 비분리 공백
+const CHAR_FIXED_WIDTH = 0x0019 // char: 고정폭 공백
 
 // FileHeader 플래그
 export const FLAG_COMPRESSED = 1 << 0
 export const FLAG_ENCRYPTED = 1 << 1
+export const FLAG_DISTRIBUTION = 1 << 2
 export const FLAG_DRM = 1 << 4
 
 // ─── 레코드 구조 ─────────────────────────────────────
@@ -214,20 +220,29 @@ export function extractText(data: Buffer): string {
     i += 2
 
     switch (ch) {
+      // ── char 타입 (2바이트만, 확장 데이터 없음) ──
       case CHAR_LINE: result += "\n"; break
-      case CHAR_PARA: break
+      case CHAR_SECTION_BREAK: result += "\n"; break  // 구역/단 나눔 → 줄바꿈
+      case CHAR_PARA: break  // 문단 끝
+      case CHAR_HYPHEN: result += "-"; break
+      case CHAR_NBSP: result += " "; break
+      case CHAR_FIXED_NBSP: result += "\u00a0"; break  // 진짜 NBSP
+      case CHAR_FIXED_WIDTH: result += " "; break  // 고정폭 공백
+
+      // ── inline 타입 (2바이트 + 14바이트 확장) ──
       case CHAR_TAB:
         result += "\t"
-        // TAB(0x0009)은 인라인 컨트롤(ch 4-9)로 14바이트 확장 데이터가 뒤따름
         if (i + 14 <= data.length) i += 14
         break
-      case CHAR_HYPHEN: result += "-"; break
-      case CHAR_NBSP: case CHAR_FIXED_NBSP: result += " "; break
+
       default:
         if (ch >= 0x0001 && ch <= 0x001f) {
-          const isExt = (ch >= 1 && ch <= 3) || (ch >= 10 && ch <= 18) || (ch >= 21 && ch <= 23)
+          // rhwp 기준 3-카테고리 분류:
+          // extended(1-3, 11-12, 14-18, 21-23) + inline(4-9, 19-20) → 14바이트 스킵
+          // char(24-31) → 스킵 없음 (이미 switch에서 24,25,30,31 처리됨)
+          const isExtended = (ch >= 1 && ch <= 3) || (ch >= 11 && ch <= 12) || (ch >= 14 && ch <= 18) || (ch >= 21 && ch <= 23)
           const isInline = (ch >= 4 && ch <= 9) || (ch >= 19 && ch <= 20)
-          if ((isExt || isInline) && i + 14 <= data.length) i += 14
+          if ((isExtended || isInline) && i + 14 <= data.length) i += 14
         } else if (ch >= 0x0020) {
           // UTF-16 surrogate pair 처리 (BMP 외 문자: 이모지, CJK 확장 등)
           if (ch >= 0xd800 && ch <= 0xdbff && i + 1 < data.length) {

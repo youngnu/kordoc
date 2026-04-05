@@ -3,9 +3,11 @@
 import {
   readRecords, decompressStream, parseFileHeader, extractText, parseDocInfo,
   TAG_PARA_HEADER, TAG_PARA_TEXT, TAG_CHAR_SHAPE, TAG_CTRL_HEADER, TAG_LIST_HEADER, TAG_TABLE,
-  FLAG_COMPRESSED, FLAG_ENCRYPTED, FLAG_DRM,
+  FLAG_COMPRESSED, FLAG_ENCRYPTED, FLAG_DISTRIBUTION, FLAG_DRM,
   type HwpRecord, type HwpDocInfo, type HwpCharShape,
 } from "./record.js"
+import { decryptViewText } from "./crypto.js"
+import { parseLenientCfb, type LenientCfbContainer } from "./cfb-lenient.js"
 import { buildTable, blocksToMarkdown, MAX_COLS, MAX_ROWS } from "../table/builder.js"
 import type { CellContext, IRBlock, IRTable, DocumentMetadata, InternalParseResult, ParseOptions, ParseWarning, OutlineItem, InlineStyle, ExtractedImage } from "../types.js"
 import { HEADING_RATIO_H1, HEADING_RATIO_H2, HEADING_RATIO_H3 } from "../types.js"
@@ -29,26 +31,53 @@ const MAX_SECTIONS = 100
 const MAX_TOTAL_DECOMPRESS = 100 * 1024 * 1024
 
 export function parseHwp5Document(buffer: Buffer, options?: ParseOptions): InternalParseResult {
-  const cfb = CFB.parse(buffer)
+  // CFB 파싱: strict 먼저, 실패 시 lenient 폴백
+  let cfb: CfbContainer | null = null
+  let lenientCfb: LenientCfbContainer | null = null
+  const warnings: ParseWarning[] = []
 
-  const headerEntry = CFB.find(cfb, "/FileHeader")
-  if (!headerEntry?.content) throw new KordocError("FileHeader 스트림 없음")
-  const header = parseFileHeader(Buffer.from(headerEntry.content))
+  try {
+    cfb = CFB.parse(buffer)
+  } catch {
+    try {
+      lenientCfb = parseLenientCfb(buffer)
+      warnings.push({ message: "손상된 CFB 컨테이너 — lenient 모드로 복구", code: "LENIENT_CFB_RECOVERY" })
+    } catch {
+      throw new KordocError("CFB 컨테이너 파싱 실패 (strict 및 lenient 모두)")
+    }
+  }
+
+  // CFB 래퍼: strict/lenient 통합 인터페이스
+  const findStream = (path: string): Buffer | null => {
+    if (cfb) {
+      const entry = CFB.find(cfb, path)
+      return entry?.content ? Buffer.from(entry.content) : null
+    }
+    return lenientCfb!.findStream(path)
+  }
+
+  const headerData = findStream("/FileHeader")
+  if (!headerData) throw new KordocError("FileHeader 스트림 없음")
+  const header = parseFileHeader(headerData)
   if (header.signature !== "HWP Document File") throw new KordocError("HWP 시그니처 불일치")
   if (header.flags & FLAG_ENCRYPTED) throw new KordocError("암호화된 HWP는 지원하지 않습니다")
   if (header.flags & FLAG_DRM) throw new KordocError("DRM 보호된 HWP는 지원하지 않습니다")
   const compressed = (header.flags & FLAG_COMPRESSED) !== 0
+  const distribution = (header.flags & FLAG_DISTRIBUTION) !== 0
 
   const metadata: DocumentMetadata = {
     version: `${header.versionMajor}.x`,
   }
-  extractHwp5Metadata(cfb, metadata)
+  if (cfb) extractHwp5Metadata(cfb, metadata)
 
   // DocInfo 파싱 (스타일 정보 추출)
-  const docInfo = parseDocInfoStream(cfb, compressed)
-  const warnings: ParseWarning[] = []
+  const docInfo = cfb
+    ? parseDocInfoStream(cfb, compressed)
+    : parseDocInfoFromStream(findStream("/DocInfo"), compressed)
 
-  const sections = findSections(cfb)
+  const sections = distribution
+    ? (cfb ? findViewTextSections(cfb, compressed) : findViewTextSectionsLenient(lenientCfb!, compressed))
+    : (cfb ? findSections(cfb) : findSectionsLenient(lenientCfb!, compressed))
   if (sections.length === 0) throw new KordocError("섹션 스트림을 찾을 수 없습니다")
 
   metadata.pageCount = sections.length
@@ -64,7 +93,8 @@ export function parseHwp5Document(buffer: Buffer, options?: ParseOptions): Inter
     if (pageFilter && !pageFilter.has(si + 1)) continue
     try {
       const sectionData = sections[si]
-      const data = compressed ? decompressStream(Buffer.from(sectionData)) : Buffer.from(sectionData)
+      // 배포용 문서는 findViewTextSections에서 이미 복호화+압축해제 완료
+      const data = (!distribution && compressed) ? decompressStream(Buffer.from(sectionData)) : Buffer.from(sectionData)
       totalDecompressed += data.length
       if (totalDecompressed > MAX_TOTAL_DECOMPRESS) throw new KordocError("총 압축 해제 크기 초과 (decompression bomb 의심)")
       const records = readRecords(data)
@@ -79,7 +109,9 @@ export function parseHwp5Document(buffer: Buffer, options?: ParseOptions): Inter
   }
 
   // BinData에서 이미지 추출
-  const images = extractHwp5Images(cfb, blocks, compressed, warnings)
+  const images = cfb
+    ? extractHwp5Images(cfb, blocks, compressed, warnings)
+    : extractHwp5ImagesLenient(lenientCfb!, blocks, compressed, warnings)
 
   // 스타일 기반 헤딩 감지
   if (docInfo) {
@@ -103,6 +135,17 @@ function parseDocInfoStream(cfb: CfbContainer, compressed: boolean): HwpDocInfo 
     const data = compressed ? decompressStream(Buffer.from(entry.content)) : Buffer.from(entry.content)
     const records = readRecords(data)
     return parseDocInfo(records)
+  } catch {
+    return null
+  }
+}
+
+/** DocInfo — Buffer에서 직접 파싱 (lenient용) */
+function parseDocInfoFromStream(raw: Buffer | null, compressed: boolean): HwpDocInfo | null {
+  if (!raw) return null
+  try {
+    const data = compressed ? decompressStream(raw) : raw
+    return parseDocInfo(readRecords(data))
   } catch {
     return null
   }
@@ -242,6 +285,25 @@ export function extractHwp5MetadataOnly(buffer: Buffer): DocumentMetadata {
   return metadata
 }
 
+/** 배포용 문서: ViewText/Section{N} 스트림을 복호화하여 반환 */
+function findViewTextSections(cfb: CfbContainer, compressed: boolean): Buffer[] {
+  const sections: Array<{ idx: number; content: Buffer }> = []
+
+  for (let i = 0; i < MAX_SECTIONS; i++) {
+    const entry = CFB.find(cfb, `/ViewText/Section${i}`)
+    if (!entry?.content) break
+    try {
+      const decrypted = decryptViewText(Buffer.from(entry.content), compressed)
+      sections.push({ idx: i, content: decrypted })
+    } catch {
+      // 복호화 실패 시 해당 섹션 스킵
+      break
+    }
+  }
+
+  return sections.sort((a, b) => a.idx - b.idx).map(s => s.content)
+}
+
 function findSections(cfb: CfbContainer): Buffer[] {
   const sections: Array<{ idx: number; content: Buffer }> = []
 
@@ -264,7 +326,42 @@ function findSections(cfb: CfbContainer): Buffer[] {
   return sections.sort((a, b) => a.idx - b.idx).map(s => s.content)
 }
 
-// ─── BinData 이미지 추출 ────────────────────────────
+/** Lenient CFB: BodyText/Section{N} 탐색 */
+function findSectionsLenient(lcfb: LenientCfbContainer, compressed: boolean): Buffer[] {
+  const sections: Array<{ idx: number; content: Buffer }> = []
+  for (let i = 0; i < MAX_SECTIONS; i++) {
+    const raw = lcfb.findStream(`/BodyText/Section${i}`) ?? lcfb.findStream(`Section${i}`)
+    if (!raw) break
+    sections.push({ idx: i, content: compressed ? decompressStream(raw) : raw })
+  }
+  if (sections.length === 0) {
+    // fallback: 이름에 "Section" 포함된 스트림
+    for (const e of lcfb.entries()) {
+      if (sections.length >= MAX_SECTIONS) break
+      if (e.name.startsWith("Section")) {
+        const idx = parseInt(e.name.replace("Section", ""), 10) || 0
+        const raw = lcfb.findStream(e.name)
+        if (raw) sections.push({ idx, content: compressed ? decompressStream(raw) : raw })
+      }
+    }
+  }
+  return sections.sort((a, b) => a.idx - b.idx).map(s => s.content)
+}
+
+/** Lenient CFB: ViewText/Section{N} 복호화 */
+function findViewTextSectionsLenient(lcfb: LenientCfbContainer, compressed: boolean): Buffer[] {
+  const sections: Array<{ idx: number; content: Buffer }> = []
+  for (let i = 0; i < MAX_SECTIONS; i++) {
+    const raw = lcfb.findStream(`/ViewText/Section${i}`) ?? lcfb.findStream(`Section${i}`)
+    if (!raw) break
+    try {
+      sections.push({ idx: i, content: decryptViewText(raw, compressed) })
+    } catch { break }
+  }
+  return sections.sort((a, b) => a.idx - b.idx).map(s => s.content)
+}
+
+// ─── BinData ���미지 추출 ─────��─────────────────��────
 
 /** SHAPE_COMPONENT 태그 — HWP5 스펙 */
 const TAG_SHAPE_COMPONENT = 0x004a
@@ -366,6 +463,55 @@ function extractHwp5Images(
   return images
 }
 
+/** Lenient CFB: BinData 이미지 추출 */
+function extractHwp5ImagesLenient(
+  lcfb: LenientCfbContainer,
+  blocks: IRBlock[],
+  compressed: boolean,
+  warnings: ParseWarning[],
+): ExtractedImage[] {
+  // BinData 엔트리 수집
+  const binDataMap = new Map<number, { data: Buffer; name: string }>()
+  const binRe = /^BIN(\d{4})/i
+  for (const e of lcfb.entries()) {
+    const match = e.name.match(binRe)
+    if (!match) continue
+    const idx = parseInt(match[1], 10)
+    let raw = lcfb.findStream(e.name)
+    if (!raw) continue
+    if (compressed) {
+      try { raw = decompressStream(raw) } catch { /* 이미 비압축일 수 있음 */ }
+    }
+    binDataMap.set(idx, { data: raw, name: e.name })
+  }
+  if (binDataMap.size === 0) return []
+
+  const images: ExtractedImage[] = []
+  let imageIndex = 0
+  for (const block of blocks) {
+    if (block.type !== "image" || !block.text) continue
+    const binId = parseInt(block.text, 10)
+    if (isNaN(binId)) continue
+    const bin = binDataMap.get(binId)
+    if (!bin) {
+      warnings.push({ page: block.pageNumber, message: `BinData ${binId} ���음`, code: "SKIPPED_IMAGE" })
+      block.type = "paragraph"; block.text = `[이미지: BinData ${binId}]`; continue
+    }
+    const mime = detectImageMime(bin.data)
+    if (!mime) {
+      warnings.push({ page: block.pageNumber, message: `BinData ${binId}: 알 수 없는 이미지 형식`, code: "SKIPPED_IMAGE" })
+      block.type = "paragraph"; block.text = `[이미지: ${bin.name}]`; continue
+    }
+    imageIndex++
+    const ext = mime.includes("jpeg") ? "jpg" : mime.includes("png") ? "png" : mime.includes("gif") ? "gif" : mime.includes("bmp") ? "bmp" : "bin"
+    const filename = `image_${String(imageIndex).padStart(3, "0")}.${ext}`
+    images.push({ filename, data: new Uint8Array(bin.data), mimeType: mime })
+    block.text = filename
+    block.imageData = { data: new Uint8Array(bin.data), mimeType: mime, filename: bin.name }
+  }
+  return images
+}
+
 function parseSection(records: HwpRecord[], docInfo: HwpDocInfo | null, warnings: ParseWarning[], sectionNum: number): IRBlock[] {
   const blocks: IRBlock[] = []
   let i = 0
@@ -408,12 +554,80 @@ function parseSection(records: HwpRecord[], docInfo: HwpDocInfo | null, warnings
       } else if (ctrlId === " elo" || ctrlId === "ole ") {
         warnings.push({ page: sectionNum, message: `스킵된 제어 요소: ${ctrlId.trim()}`, code: "SKIPPED_IMAGE" })
       }
+      // 각주/미주 — CTRL_HEADER 아래의 텍스트를 추출하여 footnoteText로 연결
+      else if (ctrlId === "fn  " || ctrlId === " nf " || ctrlId === "en  " || ctrlId === " ne ") {
+        const noteText = extractNoteText(records, i)
+        if (noteText && blocks.length > 0) {
+          // 직전 paragraph 블록에 footnoteText 연결
+          const lastBlock = blocks[blocks.length - 1]
+          if (lastBlock.type === "paragraph") {
+            lastBlock.footnoteText = lastBlock.footnoteText
+              ? lastBlock.footnoteText + "; " + noteText
+              : noteText
+          }
+        }
+      }
+      // 하이퍼링크 — CTRL_HEADER 데이터에서 URL 추출
+      else if (ctrlId === "%tok" || ctrlId === "klnk") {
+        const url = extractHyperlinkUrl(rec.data)
+        if (url && blocks.length > 0) {
+          const lastBlock = blocks[blocks.length - 1]
+          if (lastBlock.type === "paragraph" && !lastBlock.href) {
+            lastBlock.href = url
+          }
+        }
+      }
     }
 
     i++
   }
 
   return blocks
+}
+
+/** 각주/미주 CTRL_HEADER 아래의 본문 텍스트 추출 */
+function extractNoteText(records: HwpRecord[], ctrlIdx: number): string | null {
+  const ctrlLevel = records[ctrlIdx].level
+  const texts: string[] = []
+
+  for (let j = ctrlIdx + 1; j < records.length && j < ctrlIdx + 100; j++) {
+    const r = records[j]
+    if (r.level <= ctrlLevel) break  // 상위 레벨 도달 → 이 컨트롤 블록 끝
+
+    if (r.tagId === TAG_PARA_TEXT) {
+      const t = extractText(r.data).trim()
+      if (t) texts.push(t)
+    }
+  }
+
+  return texts.length > 0 ? texts.join(" ") : null
+}
+
+/** 하이퍼링크 CTRL_HEADER에서 URL 추출 (best-effort) */
+function extractHyperlinkUrl(data: Buffer): string | null {
+  // HWP5 하이퍼링크 CTRL_HEADER 구조:
+  // ctrlId(4) + 기타 필드들... + URL 문자열 (UTF-16LE, length-prefixed)
+  // 정확한 오프셋은 버전마다 다를 수 있으므로 URL 패턴 스캔으로 폴백
+  try {
+    // UTF-16LE에서 "http" 시그니처 스캔
+    const httpSig = Buffer.from("http", "utf16le")  // "h\0t\0t\0p\0"
+    const idx = data.indexOf(httpSig)
+    if (idx >= 0) {
+      // null terminator(0x0000 0x0000)까지 UTF-16LE로 읽기
+      let end = idx
+      while (end + 1 < data.length) {
+        const ch = data.readUInt16LE(end)
+        if (ch === 0) break
+        end += 2
+      }
+      const url = data.subarray(idx, end).toString("utf16le")
+      // 기본 URL 검증
+      if (/^https?:\/\/.+/.test(url) && url.length < 2000) {
+        return url
+      }
+    }
+  } catch { /* best-effort */ }
+  return null
 }
 
 /** CHAR_SHAPE ID 배열에서 대표 스타일 결정 (최빈값) */
